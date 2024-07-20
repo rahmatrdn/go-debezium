@@ -1,0 +1,73 @@
+version: "3.7"
+
+services:
+  mq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672" # RabbitMQ
+      - "15672:15672" # Management console
+    environment:
+      RABBITMQ_DEFAULT_USER: "guest"
+      RABBITMQ_DEFAULT_PASS: "guest"
+    restart: always
+
+  dbz:
+    image: debezium/server:2.7
+    logging:
+      driver: json-file
+      options:
+        max-file: 1
+        max-size: 10m
+    environment:
+      DEBEZIUM_SOURCE_CONNECTOR_CLASS: io.debezium.connector.mysql.MySqlConnector
+      DEBEZIUM_SOURCE_OFFSET_STORAGE_FILE_FILENAME: data/offsets.dat
+      DEBEZIUM_SOURCE_SCHEMA_HISTORY_INTERNAL: io.debezium.storage.file.history.FileSchemaHistory
+      DEBEZIUM_SOURCE_SCHEMA_HISTORY_INTERNAL_FILE_FILENAME: data/history.dat
+      DEBEZIUM_SOURCE_DATABASE_HOSTNAME: ${MYSQL_HOST}
+      DEBEZIUM_SOURCE_DATABASE_PORT: ${MYSQL_PORT}
+      DEBEZIUM_SOURCE_DATABASE_USER: ${MYSQL_USERNAME}
+      DEBEZIUM_SOURCE_DATABASE_PASSWORD: ${MYSQL_PASSWORD}
+      DEBEZIUM_SOURCE_DATABASE_SERVER_ID: 1
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: trx
+      DEBEZIUM_SOURCE_DATABASE_INCLUDE_LIST: go_debezium
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: go_debezium.todo_lists
+      DEBEZIUM_SOURCE_DECIMAL_HANDLING_MODE: double
+      DEBEZIUM_SOURCE_SNAPSHOT_INCLUDE_COLLECTION_LIST: go_debezium.todo_lists
+      DEBEZIUM_SOURCE_SNAPSHOT_LOCKING_MODE: none
+      DEBEZIUM_SOURCE_SNAPSHOT_MODE: schema_only
+      DEBEZIUM_SINK_TYPE: rabbitmq
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_HOST: mq
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PORT: 5672
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_USERNAME: guest
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PASSWORD: guest
+      DEBEZIUM_SINK_RABBITMQ_ACKTIMEOUT: 30000
+      DEBEZIUM_SINK_RABBITMQ_EXCHANGE: go-worker-dbz
+      DEBEZIUM_SINK_RABBITMQ_ROUTINGKEY: sync-data
+      DEBEZIUM_SINK_RABBITMQ_AUTOCREATEROUTINGKEY: true
+      DEBEZIUM_SINK_RABBITMQ_DELIVERYMODE: 2
+    ports:
+      - 8080:8080
+    volumes:
+      - ./data:/debezium/data
+      - ./conf:/debezium/conf
+    depends_on:
+      - mq
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file:
+      - ./.env
+    restart: always
+    depends_on:
+      - mq
+      - dbz
+
+  mysql:
+    image: mysql:8.0.38
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"

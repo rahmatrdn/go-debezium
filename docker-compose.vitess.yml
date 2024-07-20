@@ -1,0 +1,105 @@
+version: "3.7"
+
+services:
+  mq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672" # RabbitMQ
+      - "15672:15672" # Management console
+    environment:
+      RABBITMQ_DEFAULT_USER: "guest"
+      RABBITMQ_DEFAULT_PASS: "guest"
+    restart: always
+
+  dbz:
+    image: debezium/server:2.7
+    logging:
+      driver: json-file
+      options:
+        max-file: 1
+        max-size: 10m
+    environment:
+      DEBEZIUM_SOURCE_CONNECTOR_CLASS: io.debezium.connector.vitess.VitessConnector
+      DEBEZIUM_SOURCE_OFFSET_STORAGE_FILE_FILENAME: data/offsets.dat
+      DEBEZIUM_SOURCE_SCHEMA_HISTORY_INTERNAL: io.debezium.storage.file.history.FileSchemaHistory
+      DEBEZIUM_SOURCE_SCHEMA_HISTORY_INTERNAL_FILE_FILENAME: data/history.dat
+      DEBEZIUM_SOURCE_DATABASE_HOSTNAME: ${MYSQL_HOST}
+      DEBEZIUM_SOURCE_DATABASE_PORT: ${MYSQL_PORT}
+      DEBEZIUM_SOURCE_DATABASE_USER: ${MYSQL_USERNAME}
+      # DEBEZIUM_SOURCE_DATABASE_PASSWORD: ${MYSQL_PASSWORD}
+      DEBEZIUM_SOURCE_VITESS_KEYSPACE: go_debezium
+      DEBEZIUM_SOURCE_VITESS_SHARTD: 0
+      DEBEZIUM_SOURCE_VITESS_TABLET_TYPE: MASTER
+      DEBEZIUM_SOURCE_DATABASE_SERVER_ID: 1
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: trx
+      DEBEZIUM_SOURCE_DATABASE_INCLUDE_LIST: go_debezium
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: go_debezium.todo_lists
+      DEBEZIUM_SOURCE_DECIMAL_HANDLING_MODE: double
+      DEBEZIUM_SOURCE_SNAPSHOT_INCLUDE_COLLECTION_LIST: go_debezium.todo_lists
+      DEBEZIUM_SOURCE_SNAPSHOT_LOCKING_MODE: none
+      DEBEZIUM_SOURCE_SNAPSHOT_MODE: initial
+      DEBEZIUM_SINK_TYPE: rabbitmq
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_HOST: mq
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PORT: 5672
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_USERNAME: guest
+      DEBEZIUM_SINK_RABBITMQ_CONNECTION_PASSWORD: guest
+      DEBEZIUM_SINK_RABBITMQ_ACKTIMEOUT: 30000
+      DEBEZIUM_SINK_RABBITMQ_EXCHANGE: go-worker-dbz
+      DEBEZIUM_SINK_RABBITMQ_ROUTINGKEY: sync-data
+      DEBEZIUM_SINK_RABBITMQ_AUTOCREATEROUTINGKEY: true
+      DEBEZIUM_SINK_RABBITMQ_DELIVERYMODE: 2
+    ports:
+      - 8080:8080
+    volumes:
+      - ./data:/debezium/data
+      - ./conf:/debezium/conf
+    depends_on:
+      - mq
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file:
+      - ./.env
+    restart: always
+    depends_on:
+      - mq
+      - dbz
+
+  vitess:
+    image: vitess/vttestserver:mysql80
+    container_name: vttestserver
+    ports:
+      - "33574:33574"
+      - "33575:33575"
+      - "33577:33577"
+    environment:
+      - PORT=33574
+      - KEYSPACES=test,go_debezium
+      - NUM_SHARDS=2,1
+      - MYSQL_MAX_CONNECTIONS=70000
+      - MYSQL_BIND_HOST=0.0.0.0
+      - VTCOMBO_BIND_HOST=0.0.0.0
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h127.0.0.1", "-P33577"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  vtctld:
+    image: vitess/vtctld:v20.0.0
+    container_name: vtctld
+    ports:
+      - "33574:33574"
+      - "33575:33575"
+    environment:
+      - TOPOLOGY_FLAGS="--topo_implementation=etcd2 --topo_global_server_address=etcd:2379 --topo_global_root=/vitess/global"
+    command: [
+      "vtctld",
+      "--cell=test",
+      "--web_dir=dist",
+      "--web_dir2=dist"
+    ]
